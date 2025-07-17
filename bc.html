@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>实时价格大屏</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      color: #fff;
+      height: 100%;
+      font-family: 'Segoe UI', 'Arial Black', sans-serif;
+      overflow: hidden;
+    }
+    .grid {
+      display: grid;
+      width: 100vw;
+      height: 100vh;
+      padding: 20px;
+      box-sizing: border-box;
+      gap: 20px;
+      justify-content: center;
+      align-content: center;
+    }
+    .box {
+      background: #111;
+      border-radius: 20px;
+      border: 2px solid #333;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+      transition: all 0.3s ease;
+      box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
+    }
+    .symbol {
+      font-size: 4vw;
+      font-weight: 900;
+      color: #00ffcc;
+      text-shadow: 0 0 10px #00ffee;
+      line-height: 1;
+    }
+   .price {
+  font-size: 6vw; /* 从之前的3.5vw增大到6vw */
+  font-weight: 600;
+  color: #0f0;
+  margin-top: 10px;
+  text-shadow: 0 0 10px #0f0;
+}
+    .config-button {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: #222;
+      border: 1px solid #555;
+      color: #fff;
+      padding: 10px;
+      cursor: pointer;
+      z-index: 10;
+    }
+    .config-form {
+      position: absolute;
+      top: 60px;
+      right: 10px;
+      background: #222;
+      padding: 20px;
+      border: 1px solid #555;
+      display: none;
+      z-index: 10;
+    }
+    .config-form textarea {
+      width: 100%;
+      height: 100px;
+    }
+    .stop-button {
+  position: absolute;
+  top: 10px;
+  right: 90px;
+  background: #922;
+  border: 1px solid #f55;
+  color: #fff;
+  padding: 10px;
+  cursor: pointer;
+  z-index: 10;
+}
+
+  </style>
+</head>
+<body>
+  <button class="config-button" onclick="toggleForm()">⚙ 配置</button>
+  <button class="stop-button" onclick="stopBeep()" style="display:none;">🛑 停止</button>
+
+  <div class="config-form" id="configForm">
+    <p>格式: eth:123,456 btc:30000-32000<br/>eth btc 表示仅显示</p>
+    <textarea id="configInput">btc eth crv</textarea>
+    <button onclick="applyConfig()">应用</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <script>
+    const playInterval=60000
+    const container = document.getElementById("grid");
+    const boxes = {};
+    const alertHistory = {};
+    let alertConfig = {};
+    let displaySymbols = [];
+
+    function toggleForm() {
+      const form = document.getElementById("configForm");
+      form.style.display = form.style.display === 'block' ? 'none' : 'block';
+    }
+
+    function applyConfig() {
+      alertConfig = {};
+      displaySymbols = [];
+
+      const raw = document.getElementById("configInput").value.trim();
+      const tokens = raw.split(/\s+/);
+      for (const token of tokens) {
+        const [key, val] = token.split(":");
+        const symbol = key.toLowerCase().endsWith("usdt") ? key.toUpperCase() : (key + "USDT").toUpperCase();
+
+        if (val) {
+          let bounds;
+          if (val.includes("-")) {
+            bounds = val.split("-").map(v => parseFloat(v));
+            if (bounds.length === 2 && bounds.every(n => !isNaN(n))) {
+              alertConfig[symbol] = { type: "range", min: bounds[0], max: bounds[1] };
+            }
+          } else {
+            bounds = val.split(",").map(v => parseFloat(v));
+            if (bounds.every(n => !isNaN(n))) {
+              alertConfig[symbol] = { type: "match", targets: bounds };
+            }
+          }
+        }
+        displaySymbols.push(symbol);
+      }
+
+      if (displaySymbols.length === 0) {
+        displaySymbols = ["BTCUSDT", "ETHUSDT", "CRVUSDT"];
+      }
+
+      adjustGridLayout(displaySymbols.length);
+      reconnect();
+      document.getElementById("configForm").style.display = 'none';
+    }
+
+    function adjustGridLayout(count) {
+      const grid = document.querySelector('.grid');
+      const cols = Math.ceil(Math.sqrt(count));
+      const rows = Math.ceil(count / cols);
+      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+    }
+
+    function reconnect() {
+      container.innerHTML = "";
+      for (const k in boxes) delete boxes[k];
+      if (window.ws) window.ws.close();
+      const stream = displaySymbols.map(s => s.toLowerCase() + "@ticker").join("/");
+      const ws = new WebSocket("wss://stream.binance.com:9443/stream?streams=" + stream);
+      window.ws = ws;
+
+      ws.onmessage = event => {
+        const msg = JSON.parse(event.data);
+        const symbol = msg.data.s;
+        const price = parseFloat(msg.data.c);
+
+        const decimals = msg.data.c.includes('.') ? msg.data.c.split('.')[1].length : 0;
+        const precision = Math.pow(10, -decimals);
+        const priceStr = price.toFixed(4);
+
+        if (!boxes[symbol]) {
+          const div = document.createElement("div");
+          div.className = "box";
+          div.innerHTML = `
+            <div class="symbol">${symbol}</div>
+            <div class="price">${priceStr}</div>
+          `;
+          boxes[symbol] = div;
+          container.appendChild(div);
+        } else {
+          boxes[symbol].querySelector(".price").textContent = priceStr;
+        }
+
+        if (alertConfig[symbol]) {
+          const config = alertConfig[symbol];
+          const now = Date.now();
+          const last = alertHistory[symbol] || 0;
+          if (now - last > playInterval) {
+            if (config.type === "range") {
+              if (price < config.min || price > config.max) {
+                alertHistory[symbol] = now;
+                playBeep();
+              }
+            } else if (config.type === "match") {
+              for (const target of config.targets) {
+                console.log("✅ 播放告警: ", symbol, "价格:", price, "目标:", target);
+                playBeep();
+                // 修改这一行，从“非常接近”改为“达到或超过”
+                if (price >= target) {
+                  alertHistory[symbol] = now;
+                  playBeep();
+                  break;
+                }
+              }
+            }
+          }
+        }
+      };
+    }
+
+    let audioCtx;
+let oscillator;
+let gainNode;
+let beepTimeout;
+
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    document.addEventListener('click', () => {
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }, { once: true });
+  }
+}
+
+function playBeep() {
+  initAudio();
+  stopBeep(); // 防止叠加
+
+  oscillator = audioCtx.createOscillator();
+  gainNode = audioCtx.createGain();
+
+  oscillator.type = 'sine';
+  oscillator.frequency.value = 880;
+  oscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+
+  gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+  oscillator.start();
+
+  document.querySelector('.stop-button').style.display = 'inline-block';
+
+  beepTimeout = setTimeout(() => {
+    stopBeep();
+  }, 90000);
+}
+
+function stopBeep() {
+  if (oscillator) {
+    oscillator.stop();
+    oscillator.disconnect();
+    oscillator = null;
+  }
+  if (gainNode) {
+    gainNode.disconnect();
+    gainNode = null;
+  }
+  if (beepTimeout) {
+    clearTimeout(beepTimeout);
+    beepTimeout = null;
+  }
+  document.querySelector('.stop-button').style.display = 'none';
+}
+
+
+    applyConfig();
+  </script>
+</body>
+</html>
