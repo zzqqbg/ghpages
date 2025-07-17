@@ -218,7 +218,7 @@ font-size: clamp(24px, 7vw, 120px);
             } else if (config.type === "match") {
               for (const target of config.targets) {
                 console.log("✅ 播放告警: ", symbol, "价格:", price, "目标:", target);
-                playBeep();
+            
                 // 修改这一行，从“非常接近”改为“达到或超过”
                 if (price >= target) {
                   alertHistory[symbol] = now;
@@ -269,7 +269,12 @@ function playBeep() {
     stopBeep();
   }, 90000);
 }
-
+function startBeepFor(symbol, timestamp) {
+  // 更新历史，防止冷却期内重复
+  alertHistory[symbol] = timestamp;
+  // 开始或重启声音
+  startBeep();
+}
 function stopBeep() {
   if (oscillator) {
     oscillator.stop();
