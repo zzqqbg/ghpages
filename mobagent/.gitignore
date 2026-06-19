@@ -1,0 +1,13 @@
+node_modules/
+dist/
+tmp/
+data/
+*.db
+.env
+.env.local
+frontend/dist/
+backend/tmp/
+.DS_Store
+*.log
+playwright-report/
+test-results/

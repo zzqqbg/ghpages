@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+# MobAgent — Telegram Mini App 远程 AI 编程代理
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND="$ROOT/backend"
+FRONTEND="$ROOT/frontend"
+DIST="$ROOT/dist"
+DEPLOY="$ROOT/deploy"
+PROJ="$(basename "$ROOT")"
+PORT="${PORT:-8790}"
+VITE_PORT="${VITE_PORT:-5175}"
+APP_BIN="${APP_BIN:-mobagent-api}"
+
+# shellcheck source=/dev/null
+[ -f "$HOME/.myenv" ] && . "$HOME/.myenv"
+[ -f "$ROOT/.env" ] && . "$ROOT/.env"
+
+_info() { echo -e "\e[32m$(date +'%H:%M:%S') $*\e[0m"; }
+_warn() { echo -e "\e[33m$(date +'%H:%M:%S') $*\e[0m"; }
+_err()  { echo -e "\e[31m$(date +'%H:%M:%S') $*\e[0m"; }
+_ok()   { echo -e "\e[36m$(date +'%H:%M:%S') $*\e[0m"; }
+
+kill_port() {
+  local p="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:"$p" | xargs -r kill -9 2>/dev/null || true
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -k "${p}/tcp" 2>/dev/null || true
+  fi
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { _err "缺少命令: $1"; exit 1; }
+}
+
+cmd_init() {
+  _info "初始化依赖..."
+  require_cmd go
+  require_cmd pnpm
+  (cd "$BACKEND" && go mod tidy)
+  (cd "$FRONTEND" && pnpm install)
+  if ! command -v air >/dev/null 2>&1; then
+    _warn "安装 air 热重载..."
+    go install github.com/air-verse/air@latest
+  fi
+  _ok "✓ init 完成"
+}
+
+API_PID=""
+VITE_PID=""
+dev_cleanup() {
+  _warn "停止 dev 服务..."
+  [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null || true
+  [ -n "$VITE_PID" ] && kill "$VITE_PID" 2>/dev/null || true
+  pkill -P "$API_PID" 2>/dev/null || true
+  pkill -P "$VITE_PID" 2>/dev/null || true
+  kill_port "$PORT"
+  kill_port "$VITE_PORT"
+}
+
+cmd_dev() {
+  set +e
+  trap dev_cleanup INT TERM EXIT
+  cmd_init >/dev/null 2>&1 || true
+  kill_port "$PORT"
+  kill_port "$VITE_PORT"
+  mkdir -p "$ROOT/data"
+
+  _info "━━━━━━━━ MobAgent Dev ━━━━━━━━"
+  _info "API (air):  http://127.0.0.1:$PORT"
+  _info "Frontend:   http://127.0.0.1:$VITE_PORT"
+  _info "WebSocket:  ws://127.0.0.1:$PORT/ws"
+  _info "Ctrl+C 停止"
+  _info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  (
+    cd "$ROOT"
+    export PORT DATA_DIR="$ROOT/data" WORKSPACES_ROOT="$ROOT/data/workspaces"
+    if command -v air >/dev/null 2>&1; then
+      air -c .air.toml
+    else
+      while true; do
+        (cd "$BACKEND" && go run -buildvcs=false ./cmd/server/) || _err "API 退出，2s 后重启..."
+        sleep 2
+      done
+    fi
+  ) &
+  API_PID=$!
+  sleep 1
+
+  (
+    cd "$FRONTEND"
+    export VITE_API_BASE=""
+    pnpm dev --host 127.0.0.1 --port "$VITE_PORT"
+  ) &
+  VITE_PID=$!
+
+  wait "$API_PID" "$VITE_PID"
+}
+
+_build_frontend() {
+  _info "📦 构建前端..."
+  (cd "$FRONTEND" && pnpm install && pnpm run build)
+  mkdir -p "$DIST/web"
+  rsync -a --delete "$FRONTEND/dist/" "$DIST/web/"
+  _ok "✓ 前端 → dist/web/"
+}
+
+_build_backend() {
+  local goos="${1:-$(go env GOOS)}"
+  local goarch="${2:-$(go env GOARCH)}"
+  local out="$DIST/${APP_BIN}-${goos}-${goarch}"
+  _info "🔨 构建后端 ${goos}/${goarch} → $(basename "$out")"
+  (cd "$BACKEND" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+    go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$out" ./cmd/server/)
+  _ok "✓ $(basename "$out")"
+}
+
+_build_all() {
+  _build_frontend
+  _build_backend "${R_GOOS:-linux}" "${R_GOARCH:-amd64}"
+}
+
+cmd_build() {
+  require_cmd go
+  require_cmd pnpm
+  mkdir -p "$DIST"
+  local choice="${1:-}"
+  if [ -z "$choice" ] && command -v fzf >/dev/null 2>&1 && [ -t 0 ]; then
+    choice=$(printf '%s\n' \
+      "all\t前端 + 本机后端" \
+      "frontend\t仅 Vue 前端" \
+      "backend-local\t本机 OS/ARCH 后端" \
+      "backend-linux-amd64\tLinux amd64 后端" \
+      "backend-linux-arm64\tLinux arm64 后端" \
+      "backend-darwin-arm64\tmacOS arm64 后端" \
+      | fzf --delimiter=$'\t' --with-nth=1,2 --height=40% --reverse --prompt='构建目标: ' \
+      | cut -f1)
+    [ -z "$choice" ] && { _warn "已取消"; exit 0; }
+  else
+    choice="${choice:-all}"
+  fi
+
+  case "$choice" in
+    all) _build_frontend; _build_backend "$(go env GOOS)" "$(go env GOARCH)" ;;
+    frontend) _build_frontend ;;
+    backend-local) _build_backend "$(go env GOOS)" "$(go env GOARCH)" ;;
+    backend-linux-amd64) _build_backend linux amd64 ;;
+    backend-linux-arm64) _build_backend linux arm64 ;;
+    backend-darwin-arm64) _build_backend darwin arm64 ;;
+    *) _err "未知目标: $choice"; exit 1 ;;
+  esac
+}
+
+_ssh_target_prompt() {
+  local target="${1:-}"
+  if [ -n "$target" ]; then
+    echo "$target"
+    return
+  fi
+  if [ -n "${R_SSH:-}" ]; then
+    echo "$R_SSH"
+    return
+  fi
+  if [ -f "$HOME/.ssh/config" ] && command -v fzf >/dev/null 2>&1; then
+    target=$(awk '/^[Hh]ost / && $2 !~ /\*/ {print $2}' "$HOME/.ssh/config" | fzf --height=40% --reverse --prompt='SSH Host: ' || true)
+    [ -n "$target" ] && { echo "$target"; return; }
+  fi
+  read -rp "SSH (user@host 或 ~/.ssh/config Host): " target
+  echo "$target"
+}
+
+_ssh_cmd() {
+  local target="$1"; shift
+  if [[ "$target" == *@* ]]; then
+    ssh ${R_SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15} "$target" "$@"
+  else
+    ssh ${R_SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15} "$target" "$@"
+  fi
+}
+
+_remote_rel() {
+  echo "${R_REMOTE_REL:-projs/$PROJ}"
+}
+
+cmd_publish() {
+  local target
+  target=$(_ssh_target_prompt "${1:-}")
+  [ -z "$target" ] && { _err "未指定 SSH 目标"; exit 1; }
+
+  local remote_rel remote_dir goos goarch bin_name
+  remote_rel="$(_remote_rel)"
+  remote_dir="\$HOME/$remote_rel"
+  goos="${R_GOOS:-linux}"
+  goarch="${R_GOARCH:-amd64}"
+  bin_name="${APP_BIN}-${goos}-${goarch}"
+
+  _info "━━━━━━━━ 发布 MobAgent ━━━━━━━━"
+  _info "目标: $target"
+  _info "路径: ~/$remote_rel"
+  _info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  _build_all
+
+  if [ ! -f "$DIST/$bin_name" ]; then
+    _build_backend "$goos" "$goarch"
+  fi
+  [ -d "$DIST/web" ] || _build_frontend
+
+  _info "→ 创建远程目录..."
+  if ! _ssh_cmd "$target" "mkdir -p $remote_dir/{bin,web,deploy,data} && chmod 755 \$HOME \$HOME/projs 2>/dev/null || true"; then
+    _err "✗ SSH 连接失败: $target"
+    exit 1
+  fi
+
+  _info "→ 同步二进制与静态资源..."
+  rsync -avz --progress \
+    "$DIST/$bin_name" "$target:$remote_rel/bin/$APP_BIN" \
+    || { _err "✗ rsync 二进制失败"; exit 1; }
+  rsync -avz --delete --progress \
+    "$DIST/web/" "$target:$remote_rel/web/" \
+    || { _err "✗ rsync 前端失败"; exit 1; }
+  rsync -avz \
+    "$DEPLOY/" "$target:$remote_rel/deploy/" \
+    "$ROOT/.air.toml" "$target:$remote_rel/.air.toml" 2>/dev/null || true
+
+  _info "→ 写入 systemd 单元 (幂等)..."
+  _ssh_cmd "$target" "cat > \$HOME/.config/systemd/user/mobagent.service <<'UNIT'
+[Unit]
+Description=MobAgent API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$remote_rel
+Environment=PORT=${R_API_PORT:-8790}
+Environment=STATIC_DIR=$remote_rel/web
+Environment=DATA_DIR=$remote_rel/data
+ExecStart=$remote_dir/bin/$APP_BIN
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable mobagent.service
+systemctl --user restart mobagent.service
+loginctl enable-linger \$(whoami) 2>/dev/null || true
+"
+
+  _info "→ 配置 OpenResty/Nginx..."
+  local domain="${R_DOMAIN:-mobagent.local}"
+  local conf_name="${R_NGINX_CONF:-mobagent.conf}"
+  local conf_d="${R_OPENRESTY_CONF_D:-/etc/openresty/conf.d}"
+  local openresty_sudo="${R_OPENRESTY_SUDO:-sudo}"
+  local api_port="${R_API_PORT:-8790}"
+
+  _ssh_cmd "$target" "export DOMAIN='$domain' API_PORT='$api_port' REMOTE_DIR='$remote_rel' CONF_D='$conf_d' CONF_NAME='$conf_name' SUDO='$openresty_sudo'; bash -s" <<'REMOTE'
+set -e
+REMOTE_DIR="${REMOTE_DIR:-projs/mobagent}"
+DOMAIN="${DOMAIN:-mobagent.local}"
+API_PORT="${API_PORT:-8790}"
+CONF_D="${CONF_D:-/etc/openresty/conf.d}"
+CONF_NAME="${CONF_NAME:-mobagent.conf}"
+SUDO="${SUDO:-sudo}"
+WEB_ROOT="$HOME/$REMOTE_DIR/web"
+rendered="/tmp/${CONF_NAME}.$$"
+cat > "$rendered" <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    root ${WEB_ROOT};
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${API_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /ws {
+        proxy_pass http://127.0.0.1:${API_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:${API_PORT};
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+EOF
+echo "→ 下发 $CONF_D/$CONF_NAME"
+$SUDO mkdir -p "$CONF_D"
+$SUDO cp "$rendered" "$CONF_D/$CONF_NAME"
+rm -f "$rendered"
+if command -v openresty >/dev/null; then
+  $SUDO openresty -t && $SUDO openresty -s reload
+elif command -v nginx >/dev/null; then
+  $SUDO nginx -t && $SUDO nginx -s reload
+else
+  echo "WARN: 未找到 openresty/nginx，已写入配置但未 reload"
+fi
+# 静态目录权限（worker 可读）
+chmod -R a+rX "$HOME/$REMOTE_DIR/web" 2>/dev/null || true
+chmod o+x "$HOME" "$HOME/projs" "$HOME/$REMOTE_DIR" 2>/dev/null || true
+REMOTE
+
+  _info "→ 健康检查..."
+  local retries="${R_HEALTH_RETRIES:-15}" interval="${R_HEALTH_INTERVAL:-2}" i ok=0
+  for ((i=1; i<=retries; i++)); do
+    if _ssh_cmd "$target" "curl -sf http://127.0.0.1:${R_API_PORT:-8790}/health >/dev/null"; then
+      ok=1
+      break
+    fi
+    _warn "等待 API ($i/$retries)..."
+    sleep "$interval"
+  done
+  if [ "$ok" -eq 1 ]; then
+    _ok "✓ 发布成功 · API healthy · ~/$remote_rel"
+  else
+    _err "✗ API 健康检查失败，请 ssh $target journalctl --user -u mobagent -n 50"
+    exit 1
+  fi
+}
+
+cmd_test() {
+  _info "运行测试套件..."
+  local failed=0
+  (cd "$BACKEND" && go test ./... -short) || failed=1
+  (cd "$FRONTEND" && pnpm install --silent && pnpm test) || failed=1
+  if [ "$failed" -eq 0 ]; then
+    _ok "✓ 全部测试通过"
+  else
+    _err "✗ 测试失败"
+    exit 1
+  fi
+}
+
+cmd_worker() {
+  cmd_init >/dev/null 2>&1 || true
+  export DATA_DIR="$ROOT/data"
+  export WORKSPACES_ROOT="$ROOT/data/workspaces"
+  export LOG_DIR="$ROOT/data/logs"
+  export MOBAGENT_TOKEN="${MOBAGENT_TOKEN:-demo-token-change-me}"
+  export MOBAGENT_CLOUD_WS="${MOBAGENT_CLOUD_WS:-ws://127.0.0.1:${PORT}/ws/worker}"
+  _info "Worker → $MOBAGENT_CLOUD_WS"
+  _info "Token: ${MOBAGENT_TOKEN:0:8}…"
+  (cd "$BACKEND" && go run -buildvcs=false ./cmd/worker/)
+}
+
+cmd_help() {
+  cat <<EOF
+MobAgent 工具脚本
+
+  ./r init     安装 Go + pnpm 依赖，安装 air
+  ./r dev      启动后端(air 热重载) + 前端 Vite
+  ./r worker   启动内网 Worker（连接云端 /ws/worker）
+  ./r b        fzf 选择构建目标（前端/后端/全量/跨平台）
+  ./r p [host] SSH 发布到 ~/projs/$PROJ（幂等，含 OpenResty 配置）
+  ./r test     运行 Go + Vitest 测试
+
+环境变量:
+  R_SSH / R_REMOTE_REL / R_DOMAIN / R_API_PORT
+  R_OPENRESTY_CONF_D / R_OPENRESTY_SUDO
+  MOBAGENT_TOKEN / MOBAGENT_CLOUD_WS
+  PORT / VITE_PORT
+EOF
+}
+
+case "${1:-}" in
+  init|i) cmd_init ;;
+  dev|d) shift; cmd_dev "$@" ;;
+  b|build) shift; cmd_build "$@" ;;
+  p|publish|deploy) shift; cmd_publish "$@" ;;
+  test|t) cmd_test ;;
+  worker|w) shift; cmd_worker "$@" ;;
+  h|help|-h|--help) cmd_help ;;
+  *)
+    if command -v fzf >/dev/null 2>&1; then
+      choice=$(printf '%s\n' dev 'dev · 前后端' b 'b · 构建' p 'p · 发布' test 'test · 测试' init 'init · 依赖' \
+        | fzf --height=40% --reverse --prompt='MobAgent: ' | head -1)
+      [ -n "$choice" ] && exec "$0" "$choice"
+    fi
+    cmd_help
+    ;;
+esac

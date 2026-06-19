@@ -1,0 +1,132 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-surface: #070b14;
+  --color-panel: #0f1524;
+  --color-panel-2: #151d30;
+  --color-panel-3: #1c2640;
+  --color-accent: #3b82f6;
+  --color-accent-2: #06b6d4;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --color-idle: #64748b;
+  --color-purple: #a855f7;
+  --color-muted: #94a3b8;
+  --radius-xl: 1rem;
+}
+
+html, body, #app {
+  min-height: 100dvh;
+  background: var(--color-surface);
+}
+
+/* 全局可点击元素：手型光标 */
+:where(
+  a,
+  button,
+  [role='button'],
+  label[for],
+  select,
+  summary,
+  .clickable
+) {
+  cursor: pointer;
+}
+
+:where(
+  button:disabled,
+  [aria-disabled='true'],
+  .disabled
+) {
+  cursor: not-allowed;
+}
+
+:where(input, textarea) {
+  cursor: text;
+}
+
+/* 原生 select 在 Telegram WebView 内常失效；保留样式供非 Mini App 场景 */
+select.glass,
+select.field-select {
+  appearance: auto;
+  color: #fff;
+  background-color: var(--color-panel);
+}
+
+select option {
+  background-color: #0f1524;
+  color: #fff;
+}
+
+.glass {
+  background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+  backdrop-filter: blur(16px);
+  border: 1px solid color-mix(in srgb, white 7%, transparent);
+}
+
+.glass-strong {
+  background: linear-gradient(145deg, color-mix(in srgb, var(--color-panel-2) 95%, transparent), color-mix(in srgb, var(--color-panel) 90%, transparent));
+  backdrop-filter: blur(20px);
+  border: 1px solid color-mix(in srgb, white 10%, transparent);
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  max-width: 32rem;
+  margin-inline: auto;
+  background:
+    radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 55%),
+    var(--color-surface);
+  border-inline: 1px solid color-mix(in srgb, white 5%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 4%, transparent),
+    0 0 0 1px color-mix(in srgb, black 20%, transparent);
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.page-with-tabbar {
+  padding-bottom: 0.75rem;
+}
+
+.safe-bottom {
+  padding-bottom: 0.75rem;
+}
+
+.sheet-safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+}
+
+.page-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 1rem 1rem 0.75rem;
+}
+
+.page-shell--detail {
+  min-height: 100%;
+}
+
+.section-title {
+  @apply mb-3 text-sm font-medium text-muted;
+}
+
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  animation: spin-slow 1s linear infinite;
+}

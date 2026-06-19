@@ -1,0 +1,16 @@
+[Unit]
+Description=MobAgent API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projs/mobagent
+Environment=PORT=8790
+Environment=STATIC_DIR=%h/projs/mobagent/web
+Environment=DATA_DIR=%h/projs/mobagent/data
+ExecStart=%h/projs/mobagent/bin/mobagent-api
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
